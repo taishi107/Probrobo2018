@@ -15,9 +15,17 @@ import copy
 # In[2]:
 
 
-class Particle: 
+class Particle:  ###mclglobal1particle
     def __init__(self, init_pose, weight):
-        self.pose = init_pose
+        if init_pose is None:
+            self.pose = np.array([
+                np.random.uniform(-5.0, 5.0),
+                np.random.uniform(-5.0, 5.0),
+                np.random.uniform(-math.pi, math.pi)]
+            ).T
+        else:
+            self.pose = init_pose
+            
         self.weight = weight
         
     def motion_update(self, nu, omega, time, noise_rate_pdf): 
@@ -45,7 +53,7 @@ class Particle:
 
 
 class Mcl:  
-    def __init__(self, envmap, init_pose, num, motion_noise_stds={"nn":0.19, "no":0.001, "on":0.13, "oo":0.2},                  distance_dev_rate=0.14, direction_dev=0.05):
+    def __init__(self, envmap, init_pose, num, motion_noise_stds,                  distance_dev_rate=0.14, direction_dev=0.05):
         self.particles = [Particle(init_pose, 1.0/num) for i in range(num)]
         self.map = envmap
         self.distance_dev_rate = distance_dev_rate
@@ -70,23 +78,17 @@ class Mcl:
         self.set_ml() #リサンプリング前に実行
         self.resampling() 
             
-    def resampling(self): ###systematicsampling
-        ws = np.cumsum([e.weight for e in self.particles]) #重みを累積して足していく（最後の要素が重みの合計になる）
-        if ws[-1] < 1e-100: ws = [e + 1e-100 for e in ws]  #重みの合計が0のときの処理
-            
-        step = ws[-1]/len(self.particles)   #正規化されていない場合はステップが「重みの合計値/N」になる
-        r = np.random.uniform(0.0, step)
-        cur_pos = 0
-        ps = []            #抽出するパーティクルのリスト
+    def resampling(self): 
+        ws = [e.weight for e in self.particles]    # 重みのリストを作る
         
-        while(len(ps) < len(self.particles)):
-            if r < ws[cur_pos]:
-                ps.append(self.particles[cur_pos])  #もしかしたらcur_posがはみ出るかもしれませんが例外処理は割愛で
-                r += step
-            else:
-                cur_pos += 1
-
-        self.particles = [copy.deepcopy(e) for e in ps]                   #以下の処理は前の実装と同じ
+        #重みの和がゼロに丸め込まれるとサンプリングできなくなるので小さな数を足しておく
+        if sum(ws) < 1e-100: ws = [e + 1e-100 for e in ws]
+        
+        # パーティクルのリストから、weightsのリストの重みに比例した確率で、num個選ぶ    
+        ps = random.choices(self.particles, weights=ws, k=len(self.particles))  
+        
+        # 選んだリストからパーティクルを取り出し、重みを均一に
+        self.particles = [copy.deepcopy(e) for e in ps]
         for p in self.particles: p.weight = 1.0/len(self.particles)
         
     def draw(self, ax, elems):  
@@ -101,9 +103,9 @@ class Mcl:
 
 
 class MclAgent(Agent): 
-    def __init__(self, time_interval, nu, omega, pf):
+    def __init__(self, time_interval, nu, omega, particle_pose, envmap, particle_num=100,                 motion_noise_stds={"nn":0.19, "no":0.001, "on":0.13, "oo":0.2}): #2行目にenvmapを追加
         super().__init__(nu, omega)
-        self.pf = pf
+        self.pf = Mcl(envmap, particle_pose, particle_num, motion_noise_stds) #envmapを追加
         self.time_interval = time_interval
         
         self.prev_nu = 0.0
@@ -122,28 +124,49 @@ class MclAgent(Agent):
         elems.append(ax.text(x, y+0.1, s, fontsize=8))
 
 
-# In[7]:
+# In[5]:
 
 
-if __name__ == '__main__': 
+def trial(animation): ###mclglobal1test（下のTrialのところまで）
     time_interval = 0.1
-    world = World(30, time_interval, debug=False) 
+    world = World(30, time_interval, debug=not animation) 
 
     ## 地図を生成して3つランドマークを追加 ##
     m = Map()                                  
     m.append_landmark(Landmark(-4,2))
     m.append_landmark(Landmark(2,-3))
     m.append_landmark(Landmark(3,3))
-    world.append(m)          
+    world.append(m)
 
     ## ロボットを作る ##
-    initial_pose = np.array([0, 0, 0]).T
-    pf = Mcl(m, initial_pose, 100)
-    circling = MclAgent(time_interval, 0.2, 10.0/180*math.pi, pf)
-    r = Robot(initial_pose, sensor=Camera(m), agent=circling, color="red")
+    init_pose = np.array([
+        np.random.uniform(-5.0, 5.0),
+        np.random.uniform(-5.0, 5.0),
+        np.random.uniform(-math.pi, math.pi)]
+    ).T
+        
+    a = MclAgent(time_interval, 0.2, 10.0/180*math.pi, None, m, particle_num=1000) #初期姿勢をNoneに
+    r = Robot(init_pose, sensor=Camera(m), agent=a, color="red")
     world.append(r)
 
     world.draw()
+    
+    return (r.pose, a.pf.ml.pose)
+
+
+# In[6]:
+
+
+if __name__ == '__main__':
+    ok = 0 ###mclglobal1exec
+    for i in range(1000):
+        actual, estm = trial(False)
+        diff = math.sqrt((actual[0]-estm[0])**2 + (actual[1]-estm[1])**2)
+        print(i, "真値:", actual, "推定値", estm, "誤差:", diff)
+        if diff <= 1.0:
+            ok += 1
+
+    ok
 
 
 # In[ ]:

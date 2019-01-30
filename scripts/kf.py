@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python
 # coding: utf-8
 
 # In[1]:
@@ -14,8 +14,17 @@ from matplotlib.patches import Ellipse
 # In[2]:
 
 
+def sigma_ellipse(p, cov, n): 
+    eig_vals, eig_vec = np.linalg.eig(cov)
+    ang = math.atan2(eig_vec[:,0][1], eig_vec[:,0][0])/math.pi*180
+    return Ellipse(p, width=n*math.sqrt(eig_vals[0]),height=n*math.sqrt(eig_vals[1]), angle=ang, fill=False, color="blue", alpha=0.5)
+
+
+# In[3]:
+
+
 class KalmanFilter: ###kf4init
-    def __init__(self, envmap, init_pose, motion_noise_stds, distance_dev_rate=0.14, direction_dev=0.05): #変数追加
+    def __init__(self, envmap, init_pose, motion_noise_stds={"nn":0.19, "no":0.001, "on":0.13, "oo":0.2},                  distance_dev_rate=0.14, direction_dev=0.05): #変数追加
         self.belief = multivariate_normal(mean=init_pose,                                         cov=np.diag([1e-10, 1e-10, 1e-10])) 
         self.motion_noise_stds = motion_noise_stds
         self.map = envmap  #以下3行追加（Mclと同じ）
@@ -46,34 +55,31 @@ class KalmanFilter: ###kf4init
             self.belief.mean += K.dot(z - hmu)
             self.belief.cov = (np.eye(3) - K.dot(H)).dot(self.belief.cov)
         
-    def motion_update(self, nu, omega, time): 
-        if abs(nu) < 1e-10 and abs(omega) < 1e-10:
-            return
+    def motion_update(self, nu, omega, time): #追加
+        if abs(omega) < 1e-5: omega = 1e-5 #ゼロにすると式が変わるので避ける
+        if abs(nu) < 1e-5:         nu = 1e-5
 
         v = self.motion_noise_stds
         M = np.diag([v["nn"]**2*abs(nu)/time + v["no"]**2*abs(omega)/time, 
                      v["on"]**2*abs(nu)/time + v["oo"]**2*abs(omega)/time])
         
         t = self.belief.mean[2]
-        A = time * np.array([[math.cos(t), 0.0], [math.sin(t), 0.0], [0.0, 1.0]])
+        st, ct = math.sin(t), math.cos(t)
+        stw, ctw = math.sin(t + omega*time), math.cos(t + omega*time)
+        A = np.array([[(stw - st)/omega,    -nu/(omega**2)*(stw - st) + nu/omega*time*ctw],
+                                 [(-ctw + ct)/omega, -nu/(omega**2)*(-ctw + ct) + nu/omega*time*stw],
+                                 [0,                                time]] )
         
-        G = np.diag([1.0, 1.0, 1.0])
-        if abs(omega) < 10e-5:
-            G[0, 2] = - nu * time * math.sin(t)
-            G[1, 2] = nu * time * math.cos(t)
-        else:
-            G[0, 2] = nu / omega * (math.cos(t + omega * time) - math.cos(t))
-            G[1, 2] = nu / omega * (math.sin(t + omega * time) - math.sin(t))
+        F = np.diag([1.0, 1.0, 1.0])
+        F[0, 2] = nu / omega * (math.cos(t + omega * time) - math.cos(t))
+        F[1, 2] = nu / omega * (math.sin(t + omega * time) - math.sin(t))
             
-        self.belief.cov = G.dot(self.belief.cov).dot(G.T) + A.dot(M).dot(A.T)
+        self.belief.cov = F.dot(self.belief.cov).dot(F.T) + A.dot(M).dot(A.T)
         self.belief.mean = IdealRobot.state_transition(nu, omega, time, self.belief.mean)
-
+        
     def draw(self, ax, elems):
-        ###xy平面上での誤差楕円（3シグマ範囲）###
-        eig_vals, eig_vec = np.linalg.eig(self.belief.cov[0:2, 0:2])
-        ang = math.atan2(eig_vec[:,0][1], eig_vec[:,0][0])/math.pi*180
-        e = Ellipse(self.belief.mean[0:2], width=3*eig_vals[0],height=3*eig_vals[1],
-                       angle=ang, fill=False, color="blue", alpha=0.5)
+        ###xy平面上の誤差の3シグマ範囲###
+        e = sigma_ellipse(self.belief.mean[0:2], self.belief.cov[0:2, 0:2], 3)
         elems.append(ax.add_patch(e))
 
         ###θ方向の誤差の3シグマ範囲###
@@ -84,19 +90,19 @@ class KalmanFilter: ###kf4init
         elems += ax.plot(xs, ys, color="blue", alpha=0.5)
 
 
-# In[3]:
+# In[4]:
 
 
 class KfAgent(Agent): 
-    def __init__(self, time_interval, nu, omega, init_pose, envmap,                 motion_noise_stds={"nn":0.19, "no":0.001, "on":0.13, "oo":0.2}):
+    def __init__(self, time_interval, nu, omega, kf):
         super().__init__(nu, omega)
-        self.kf = KalmanFilter(envmap, init_pose, motion_noise_stds) 
+        self.kf = kf
         self.time_interval = time_interval
         
         self.prev_nu = 0.0
         self.prev_omega = 0.0
         
-    def decision(self, observation=None):  ###kfagent2
+    def decision(self, observation=None):  ###kfagent4
         self.kf.motion_update(self.prev_nu, self.prev_omega, self.time_interval) 
         self.prev_nu, self.prev_omega = self.nu, self.omega
         self.kf.observation_update(observation)   #追加
@@ -106,12 +112,12 @@ class KfAgent(Agent):
         self.kf.draw(ax, elems)
 
 
-# In[4]:
+# In[5]:
 
 
 if __name__ == '__main__': 
     time_interval = 0.1
-    world = World(30, time_interval) 
+    world = World(30, time_interval, debug=False) 
 
     ### 地図を生成して3つランドマークを追加 ###
     m = Map()                                  
@@ -121,16 +127,27 @@ if __name__ == '__main__':
     world.append(m)          
 
     ### ロボットを作る ###
-    circling = KfAgent(time_interval, 0.2, 10.0/180*math.pi, np.array([0, 0, 0]).T, m)
-    r = Robot(np.array([0, 0, 0]).T, sensor=Camera(m), agent=circling, color="red")
+    initial_pose = np.array([0, 0, 0]).T
+    kf = KalmanFilter(m, initial_pose)
+    circling = KfAgent(time_interval, 0.2, 10.0/180*math.pi, kf)
+    r = Robot(initial_pose, sensor=Camera(m), agent=circling, color="red")
     world.append(r)
-    linear = KfAgent(time_interval, 0.1, 0.0, np.array([0, 0, 0]).T, m)
-    r = Robot(np.array([0, 0, 0]).T, sensor=Camera(m), agent=linear, color="red")
+    
+    kf = KalmanFilter(m, initial_pose)
+    linear = KfAgent(time_interval, 0.1, 0.0, kf)
+    r = Robot(initial_pose, sensor=Camera(m), agent=linear, color="red")
     world.append(r)
-    right = KfAgent(time_interval, 0.1, -3.0/180*math.pi, np.array([0, 0, 0]).T, m)
-    r = Robot(np.array([0, 0, 0]).T, sensor=Camera(m), agent=right, color="red")
+    
+    kf = KalmanFilter(m, initial_pose)
+    right = KfAgent(time_interval, 0.1, -3.0/180*math.pi, kf)
+    r = Robot(initial_pose, sensor=Camera(m), agent=right, color="red")
     world.append(r)
 
-    world.draw()                       # アニメーションさせるとき
-   # r.one_step(time_interval)  # アニメーションなしでデバッグするとき
+    world.draw()
+
+
+# In[ ]:
+
+
+
 
